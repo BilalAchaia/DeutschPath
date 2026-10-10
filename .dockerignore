@@ -1,0 +1,35 @@
+# Keep the build context small and reproducible.
+.git
+.gitignore
+.github
+
+# Python
+**/__pycache__/
+**/*.py[cod]
+backend/venv/
+backend/.venv/
+backend/.deps_hash
+
+# Node / Next.js
+**/node_modules/
+**/.next/
+**/out/
+frontend/.pkg_hash
+frontend/.build_hash
+next-env.d.ts
+
+# Pre-built static output is produced inside the image, never copied from host
+backend/static/
+
+# Local state / secrets — must not leak into the image
+backend/.env
+backend/*.db
+backend/usage.json
+backend/uploads/
+.data/
+
+# Distribution / docs / launcher (not needed to run the server)
+dist/
+build/
+DeutschPath.app/
+*.md

@@ -66,7 +66,8 @@ class TestConnectionRequest(BaseModel):
 @router.get("")
 def get_settings():
     env = _read_env()
-    raw_key = env.get("GEMINI_API_KEY", "")
+    # Prefer an explicit env var (e.g. set in the cloud dashboard) over .env.
+    raw_key = os.getenv("GEMINI_API_KEY") or env.get("GEMINI_API_KEY", "")
     key_set = bool(raw_key and raw_key not in ("", "your-gemini-api-key-here"))
     masked = ""
     if key_set and len(raw_key) > 8:
@@ -138,7 +139,13 @@ def delete_gemini_key():
 
 @router.get("/backup")
 def download_backup():
-    from database import DB_PATH
+    from database import DB_PATH, IS_SQLITE
+    if not IS_SQLITE:
+        raise HTTPException(
+            400,
+            "Backup is only available for the local SQLite database. "
+            "Use your database provider's backup tools for Postgres.",
+        )
     if not os.path.isfile(DB_PATH):
         raise HTTPException(404, "Database not found")
     return FileResponse(
@@ -150,7 +157,13 @@ def download_backup():
 
 @router.post("/restore")
 async def restore_backup(file: UploadFile = File(...)):
-    from database import DB_PATH, engine
+    from database import DB_PATH, IS_SQLITE, engine
+    if not IS_SQLITE:
+        raise HTTPException(
+            400,
+            "Restore is only available for the local SQLite database. "
+            "Use your database provider's tools for Postgres.",
+        )
     content = await file.read()
     if not content.startswith(b"SQLite format 3"):
         raise HTTPException(400, "Not a valid SQLite database file")

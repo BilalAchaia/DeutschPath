@@ -1,0 +1,22 @@
+# Render Blueprint — deploys DeutschPath as ONE free Docker web service.
+# Docs: https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: deutschpath
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      # Prompted for securely in the Render dashboard (never stored in git).
+      - key: GEMINI_API_KEY
+        sync: false
+      # Neon (or any PostgreSQL) connection string. Leave unset to use the
+      # container's local SQLite fallback instead.
+      - key: DATABASE_URL
+        sync: false
+      # Where the SQLite DB, uploads and usage stats are written in the container.
+      - key: DATA_DIR
+        value: /data

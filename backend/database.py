@@ -2,14 +2,48 @@ import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "deutschpath.db")
-DATABASE_URL = f"sqlite:///{DB_PATH}"
+# All mutable state (SQLite DB, uploaded books, usage stats) lives under DATA_DIR.
+# Defaults to the backend directory for local development. In the container it is
+# set to /data so it can be backed by a persistent volume/disk.
+DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
+os.makedirs(DATA_DIR, exist_ok=True)
 
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False},
-    echo=False,
-)
+# SQLite fallback path (used only when DATABASE_URL is not provided).
+DB_PATH = os.path.join(DATA_DIR, "deutschpath.db")
+
+# Prefer an external database (e.g. Neon PostgreSQL) when DATABASE_URL is set.
+# Otherwise fall back to a local SQLite file so local development needs zero setup.
+_raw_url = os.getenv("DATABASE_URL", "").strip()
+if _raw_url:
+    # Heroku/older style "postgres://" is not understood by SQLAlchemy 2.x.
+    if _raw_url.startswith("postgres://"):
+        _raw_url = "postgresql://" + _raw_url[len("postgres://"):]
+    # Pin the sync driver explicitly (psycopg2-binary) so the connection works
+    # regardless of the installed SQLAlchemy version's default DBAPI.
+    if _raw_url.startswith("postgresql://"):
+        _raw_url = "postgresql+psycopg2://" + _raw_url[len("postgresql://"):]
+    DATABASE_URL = _raw_url
+    IS_SQLITE = DATABASE_URL.startswith("sqlite")
+else:
+    DATABASE_URL = f"sqlite:///{DB_PATH}"
+    IS_SQLITE = True
+
+if IS_SQLITE:
+    engine = create_engine(
+        DATABASE_URL,
+        connect_args={"check_same_thread": False},
+        echo=False,
+    )
+else:
+    # External DB (Postgres/Neon). pool_pre_ping avoids stale connections that
+    # serverless Postgres providers close while idle.
+    engine = create_engine(
+        DATABASE_URL,
+        pool_pre_ping=True,
+        pool_recycle=1800,
+        echo=False,
+    )
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
@@ -24,12 +58,17 @@ def get_db() -> Session:
 def init_db():
     from models import Base
     Base.metadata.create_all(bind=engine)
-    _migrate_sqlite()
+    if IS_SQLITE:
+        _migrate_sqlite()
     _seed_if_empty()
 
 
 def _migrate_sqlite():
-    """Add new columns to existing SQLite tables if they're missing."""
+    """Add new columns to existing SQLite tables if they're missing.
+
+    SQLite-only: a fresh Postgres database is created with the full schema by
+    ``create_all`` so no ad-hoc migration is required.
+    """
     with engine.connect() as conn:
         from sqlalchemy import text
 

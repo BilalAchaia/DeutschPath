@@ -36,6 +36,9 @@ backend/uploads/**
 *.log
 backend/usage.json
 
+# ── Server-rendered frontend bundled into the backend (built in Docker) ────────
+backend/static/
+
 # ── Mac app generated assets (rebuilt from logo.png on first launch) ──────────
 frontend/public/favicon.png
 

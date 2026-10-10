@@ -27,6 +27,11 @@ const tabs = [
 type BackendStatus = "online" | "offline" | "checking";
 type ShutdownState = "idle" | "shutting-down" | "stopped";
 
+function isLocalhost(): boolean {
+  if (typeof window === "undefined") return false;
+  return ["localhost", "127.0.0.1", "::1", "[::1]"].includes(window.location.hostname);
+}
+
 export function TabNav() {
   const pathname = usePathname();
   const router = useRouter();
@@ -34,9 +39,12 @@ export function TabNav() {
   const [pendingHref, setPendingHref] = useState<string | null>(null);
   const { theme, toggle } = useTheme();
 
+  const [isLocal, setIsLocal] = useState(false);
   const [backendStatus, setBackendStatus] = useState<BackendStatus>("checking");
   const [showShutdownDialog, setShowShutdownDialog] = useState(false);
   const [shutdownState, setShutdownState] = useState<ShutdownState>("idle");
+
+  useEffect(() => { setIsLocal(isLocalhost()); }, []);
 
   // Poll backend status every 30 s
   useEffect(() => {
@@ -139,14 +147,16 @@ export function TabNav() {
           {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
         </button>
 
-        {/* Turn Off button */}
-        <button
-          onClick={() => setShowShutdownDialog(true)}
-          title="Turn off DeutschPath"
-          className="ml-1 p-2 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors shrink-0"
-        >
-          <Power size={16} />
-        </button>
+        {/* Turn Off button — local launcher only, never in the cloud */}
+        {isLocal && (
+          <button
+            onClick={() => setShowShutdownDialog(true)}
+            title="Turn off DeutschPath"
+            className="ml-1 p-2 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors shrink-0"
+          >
+            <Power size={16} />
+          </button>
+        )}
       </nav>
 
       {/* ── Shutdown confirmation dialog ── */}

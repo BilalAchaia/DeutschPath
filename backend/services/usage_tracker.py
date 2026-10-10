@@ -5,6 +5,7 @@ Persists to usage.json in the backend root directory.
 import os
 import json
 from threading import Lock
+from database import DATA_DIR
 
 # Gemini 2.5 Flash — text (GA pricing, June 2026)
 TEXT_INPUT_PER_M   = 0.30   # prompt tokens
@@ -15,9 +16,7 @@ TEXT_THOUGHT_PER_M = 2.50   # thinking tokens (billed same as output)
 TTS_INPUT_PER_M  =  0.50   # text tokens sent to TTS model
 TTS_OUTPUT_PER_M = 10.00   # audio output tokens (~11 h per 1M tokens)
 
-USAGE_FILE = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "usage.json"
-)
+USAGE_FILE = os.path.join(DATA_DIR, "usage.json")
 _lock = Lock()
 
 _EMPTY = {

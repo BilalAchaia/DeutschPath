@@ -5,14 +5,14 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from database import get_db
+from database import get_db, DATA_DIR
 from models import Book
 from services.pdf_service import extract_pages, detect_book_level, get_page_text
 from services.ai_service import ocr_page, analyze_page_image, read_page_context
 
 router = APIRouter(prefix="/books", tags=["books"])
 
-UPLOADS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "uploads", "books")
+UPLOADS_DIR = os.path.join(DATA_DIR, "uploads", "books")
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
