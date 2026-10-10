@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime, date
 from sqlalchemy import (
     Column, String, Integer, Boolean, Float, Text, DateTime, JSON, ForeignKey, UniqueConstraint,
+    LargeBinary,
 )
 from sqlalchemy.orm import relationship, declarative_base
 
@@ -31,6 +32,23 @@ class Book(Base):
 
     words         = relationship("Word", back_populates="book", passive_deletes=True)
     grammar_notes = relationship("GrammarNote", back_populates="book", passive_deletes=True)
+
+
+class BookFile(Base):
+    """Raw uploaded book bytes stored in the database.
+
+    Vercel Functions have an ephemeral, per-instance filesystem, so uploaded
+    files cannot be persisted on disk there. Storing the bytes in the database
+    (Postgres on Vercel, SQLite locally) keeps books readable across
+    invocations and redeploys. ``storage_path`` on ``Book`` is retained only as
+    a logical/legacy name; the bytes live here.
+    """
+
+    __tablename__ = "book_files"
+
+    book_id    = Column(String, ForeignKey("books.id", ondelete="CASCADE"), primary_key=True)
+    data       = Column(LargeBinary, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class Word(Base):

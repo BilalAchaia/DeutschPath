@@ -6,7 +6,13 @@ import os
 import platform
 import signal
 import subprocess
+import sys
 import threading
+
+# Ensure this package directory is importable as top-level modules (database,
+# models, routers, services). Locally it is already on sys.path; on Vercel the
+# module can be loaded from a different working directory.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 load_dotenv()
 
@@ -47,7 +53,12 @@ app.include_router(annotations.router, prefix="/api")
 
 @app.on_event("startup")
 def startup():
-    init_db()
+    try:
+        init_db()
+    except Exception as e:
+        # On serverless, concurrent cold starts can race the one-time seed.
+        # Log and continue so the app still serves requests.
+        print(f"WARNING: database initialization failed: {e}")
     key = os.getenv("GEMINI_API_KEY", "")
     if not key or key == "your-gemini-api-key-here":
         print("\nWARNING: GEMINI_API_KEY is not set.")

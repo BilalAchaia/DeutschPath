@@ -1,11 +1,17 @@
 import os
+import tempfile
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 
 # All mutable state (SQLite DB, uploaded books, usage stats) lives under DATA_DIR.
 # Defaults to the backend directory for local development. In the container it is
 # set to /data so it can be backed by a persistent volume/disk.
-DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
+_DEFAULT_DATA_DIR = os.path.dirname(os.path.abspath(__file__))
+if os.getenv("VERCEL"):
+    # Vercel's filesystem is read-only except /tmp (which is per-instance).
+    # Book bytes live in the database, so /tmp is only used for scratch files.
+    _DEFAULT_DATA_DIR = os.path.join(tempfile.gettempdir(), "deutschpath")
+DATA_DIR = os.getenv("DATA_DIR", _DEFAULT_DATA_DIR)
 os.makedirs(DATA_DIR, exist_ok=True)
 
 # SQLite fallback path (used only when DATABASE_URL is not provided).

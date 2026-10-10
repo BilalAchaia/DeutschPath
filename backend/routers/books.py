@@ -2,18 +2,24 @@ import os
 import io
 import uuid
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from database import get_db, DATA_DIR
-from models import Book
+from models import Book, BookFile
 from services.pdf_service import extract_pages, detect_book_level, get_page_text
 from services.ai_service import ocr_page, analyze_page_image, read_page_context
 
 router = APIRouter(prefix="/books", tags=["books"])
 
+# Vercel Functions reject request bodies over 4.5 MB (hard platform limit), and
+# storing multi-MB rows in the database gets costly, so cap uploads below that
+# limit. Override with MAX_UPLOAD_BYTES when self-hosting with a higher ceiling.
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(4 * 1024 * 1024)))
+
+# Legacy on-disk location (pre-DB storage). Retained so existing local installs
+# can still read books that were saved before bytes moved into the database.
 UPLOADS_DIR = os.path.join(DATA_DIR, "uploads", "books")
-os.makedirs(UPLOADS_DIR, exist_ok=True)
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 IMAGE_MIMES = {
@@ -24,9 +30,40 @@ IMAGE_MIMES = {
 }
 
 
+def _book_ext(book: Book) -> str:
+    """Best-effort file extension from the book's logical filename/path."""
+    for path in (book.filename, book.storage_path):
+        if path:
+            ext = os.path.splitext(path)[1].lower()
+            if ext:
+                return ext
+    return ""
+
+
+def _store_file(db: Session, book_id: str, data: bytes) -> None:
+    """Insert or replace the stored bytes for a book."""
+    existing = db.query(BookFile).filter(BookFile.book_id == book_id).first()
+    if existing:
+        existing.data = data
+    else:
+        db.add(BookFile(book_id=book_id, data=data))
+
+
+def _load_file_bytes(db: Session, book: Book) -> bytes:
+    """Return the book bytes from the database, falling back to legacy disk."""
+    row = db.query(BookFile).filter(BookFile.book_id == book.id).first()
+    if row is not None and row.data is not None:
+        return bytes(row.data)
+    legacy = book.storage_path
+    if legacy and os.path.isfile(legacy):
+        with open(legacy, "rb") as f:
+            return f.read()
+    raise HTTPException(404, "Book file not found")
+
+
 @router.post("/upload")
 async def upload_book(user_id: str, title: str, file: UploadFile = File(...), db: Session = Depends(get_db)):
-    ext = os.path.splitext(file.filename.lower())[1]
+    ext = os.path.splitext((file.filename or "").lower())[1]
     is_image = ext in IMAGE_EXTS
     is_pdf = ext == ".pdf"
 
@@ -34,6 +71,12 @@ async def upload_book(user_id: str, title: str, file: UploadFile = File(...), db
         raise HTTPException(400, "Only PDF and image files (JPG, PNG, WEBP) are supported")
 
     file_bytes = await file.read()
+    if len(file_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            413,
+            f"File too large ({len(file_bytes) // (1024 * 1024)} MB). "
+            f"The maximum upload size is {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.",
+        )
 
     if is_image:
         total_pages = 1
@@ -47,24 +90,19 @@ async def upload_book(user_id: str, title: str, file: UploadFile = File(...), db
         file_type = "pdf"
 
     book_id = str(uuid.uuid4())
-    user_dir = os.path.join(UPLOADS_DIR, user_id)
-    os.makedirs(user_dir, exist_ok=True)
-    storage_path = os.path.join(user_dir, f"{book_id}{ext}")
-
-    with open(storage_path, "wb") as f:
-        f.write(file_bytes)
 
     book = Book(
         id=book_id,
         user_id=user_id,
         title=title,
         filename=file.filename,
-        storage_path=storage_path,
+        storage_path=f"{book_id}{ext}",
         total_pages=total_pages,
         dominant_level=dominant_level,
         file_type=file_type,
     )
     db.add(book)
+    _store_file(db, book_id, file_bytes)
     db.commit()
     db.refresh(book)
 
@@ -84,8 +122,7 @@ def get_book_pages(book_id: str, user_id: str, db: Session = Depends(get_db)):
         raise HTTPException(404, "Book not found")
     if (book.file_type or "pdf") == "image":
         return {"book": _book_dict(book), "pages": []}
-    with open(book.storage_path, "rb") as f:
-        file_bytes = f.read()
+    file_bytes = _load_file_bytes(db, book)
     pages = extract_pages(file_bytes)
     return {"book": _book_dict(book), "pages": pages}
 
@@ -97,13 +134,12 @@ async def get_page_text_endpoint(book_id: str, page_num: int, user_id: str, db: 
     if not book:
         raise HTTPException(404, "Book not found")
 
-    with open(book.storage_path, "rb") as f:
-        file_bytes = f.read()
+    file_bytes = _load_file_bytes(db, book)
 
     file_type = book.file_type or "pdf"
 
     if file_type == "image":
-        ext = os.path.splitext(book.storage_path)[1].lower()
+        ext = _book_ext(book)
         mime = IMAGE_MIMES.get(ext, "image/jpeg")
         try:
             text = await ocr_page(file_bytes, mime_type=mime)
@@ -131,11 +167,17 @@ async def get_page_text_endpoint(book_id: str, page_num: int, user_id: str, db: 
 @router.get("/{book_id}/file")
 def serve_book_file(book_id: str, user_id: str, db: Session = Depends(get_db)):
     book = db.query(Book).filter(Book.id == book_id, Book.user_id == user_id).first()
-    if not book or not os.path.exists(book.storage_path):
+    if not book:
         raise HTTPException(404, "Book file not found")
-    ext = os.path.splitext(book.storage_path)[1].lower()
+    ext = _book_ext(book)
     media_type = IMAGE_MIMES.get(ext, "application/pdf")
-    return FileResponse(book.storage_path, media_type=media_type)
+    data = _load_file_bytes(db, book)
+    filename = book.filename or f"{book.id}{ext}"
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
 
 
 @router.delete("/{book_id}")
@@ -143,7 +185,8 @@ def delete_book(book_id: str, user_id: str, db: Session = Depends(get_db)):
     book = db.query(Book).filter(Book.id == book_id, Book.user_id == user_id).first()
     if not book:
         raise HTTPException(404, "Book not found")
-    if os.path.exists(book.storage_path):
+    db.query(BookFile).filter(BookFile.book_id == book_id).delete()
+    if book.storage_path and os.path.isfile(book.storage_path):
         os.remove(book.storage_path)
     from models import PageContext
     db.query(PageContext).filter(PageContext.book_id == book_id).delete()
@@ -166,8 +209,13 @@ async def overwrite_book_file(
     if (book.file_type or "pdf") != "pdf":
         raise HTTPException(400, "Only PDF books can be overwritten")
     content = await file.read()
-    with open(book.storage_path, "wb") as f:
-        f.write(content)
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            413,
+            f"File too large. The maximum upload size is {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.",
+        )
+    _store_file(db, book.id, content)
+    db.commit()
     return {"ok": True}
 
 
@@ -188,8 +236,9 @@ async def ocr_region(
         raise HTTPException(404, "Book not found")
     if (book.file_type or "pdf") != "image":
         raise HTTPException(400, "Only image books support region OCR")
-    with PILImage.open(book.storage_path) as _raw:
-        img = ImageOps.exif_transpose(_raw)  # honour phone/camera rotation tag
+    file_bytes = _load_file_bytes(db, book)
+    with PILImage.open(io.BytesIO(file_bytes)) as _raw:
+        img = ImageOps.exif_transpose(_raw)
         iw, ih = img.size
         left = max(0, int(x * iw))
         top = max(0, int(y * ih))
@@ -241,14 +290,14 @@ async def ocr_regions_batch(
     # Render the full page once at high resolution so Gemini gets surrounding
     # context for each region (no crop-edge ambiguity, no hallucination).
     if file_type == "image":
-        with PILImage.open(book.storage_path) as raw:
+        file_bytes = _load_file_bytes(db, book)
+        with PILImage.open(io.BytesIO(file_bytes)) as raw:
             oriented = ImageOps.exif_transpose(raw).convert("RGB")
         buf = io.BytesIO()
         oriented.save(buf, format="PNG")
         full_page_bytes = buf.getvalue()
     else:
-        with open(book.storage_path, "rb") as f:
-            file_bytes = f.read()
+        file_bytes = _load_file_bytes(db, book)
         if page_num < 1 or page_num > book.total_pages:
             raise HTTPException(400, "Invalid page number")
         import pdfplumber
@@ -285,13 +334,12 @@ async def analyze_page(
     book = db.query(Book).filter(Book.id == book_id, Book.user_id == user_id).first()
     if not book:
         raise HTTPException(404, "Book not found")
-    with open(book.storage_path, "rb") as f:
-        file_bytes = f.read()
+    file_bytes = _load_file_bytes(db, book)
     file_type = book.file_type or "pdf"
     if file_type == "image":
         from PIL import Image as PILImage, ImageOps
         import io as _io
-        with PILImage.open(book.storage_path) as _raw:
+        with PILImage.open(_io.BytesIO(file_bytes)) as _raw:
             oriented = ImageOps.exif_transpose(_raw)
             buf = _io.BytesIO()
             oriented.save(buf, format="PNG")
@@ -333,11 +381,10 @@ async def read_context(
         raise HTTPException(404, "Book not found")
 
     file_type = book.file_type or "pdf"
-    with open(book.storage_path, "rb") as f:
-        file_bytes = f.read()
+    file_bytes = _load_file_bytes(db, book)
 
     if file_type == "image":
-        ext = os.path.splitext(book.storage_path)[1].lower()
+        ext = _book_ext(book)
         mime = IMAGE_MIMES.get(ext, "image/jpeg")
         image_bytes = file_bytes
     else:
@@ -427,10 +474,9 @@ async def reader_chat(
     else:
         page_context = None
         file_type = book.file_type or "pdf"
-        with open(book.storage_path, "rb") as f:
-            file_bytes = f.read()
+        file_bytes = _load_file_bytes(db, book)
         if file_type == "image":
-            ext = os.path.splitext(book.storage_path)[1].lower()
+            ext = _book_ext(book)
             mime = IMAGE_MIMES.get(ext, "image/jpeg")
             try:
                 page_text = await ocr_page(file_bytes, mime_type=mime)
